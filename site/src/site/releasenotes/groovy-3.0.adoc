@@ -1,0 +1,1014 @@
+:source-highlighter: pygments
+:pygments-style: emacs
+:icons: font
+
+Groovy 3.0 comes with a brand-new parser (code-named Parrot) and host of other new features and capabilities.
+
+[[Groovy3.0releasenotes-Parrot]]
+== Parrot Parser
+
+Groovy 3.0, has a new parser that is far more flexible and maintainable than the parser in previous versions of Groovy.
+It's called the Parrot parser because in the early days of creating the parser, the goal was for the new parser's output to be an exact echo of what the old parser produced.
+The new parser has since been extended to support additional syntax options and language features. Some of the new features include:
+
+* do-while loops; enhanced (now supporting commas) classic for loops, e.g. `for(int i = 0, j = 10; i < j; i++, j--) {..}`)
+* lambda expressions, e.g. `stream.map(e -> e + 1)`
+* method references and constructor references
+* try-with-resources, AKA ARM
+* code blocks, i.e. `{..}`
+* Java style array initializers, e.g. `new int[] {1, 2, 3}`
+* default methods within interfaces
+* additional places for type annotations
+* new operators: identity operators(`===`, `!==`), elvis assignment(`?=`), `!in`, `!instanceof`
+* safe index, e.g. `nullableVar?[1, 2]`
+* non-static inner class instantiation, e.g. `outer.new Inner()`
+* runtime groovydoc, i.e. groovydoc with `@Groovydoc`; groovydoc attached to AST node as metadata
+
+*P.S. Parrot is based on the highly optimized version of antlr4(com.tunnelvisionlabs:antlr4), which is licensed under BSD.*
+
+=== do/while loop
+
+Java's class do/while loop is now supported. Example:
+
+[source,groovy]
+--------------------------------------
+// classic Java-style do..while loop
+def count = 5
+def fact = 1
+do {
+    fact *= count--
+} while(count > 1)
+assert fact == 120
+--------------------------------------
+
+=== Enhanced classic Java-style for loop
+
+The more elaborate form of Java's classic for loop with comma-separate expressions
+is now supported. Example:
+
+[source,groovy]
+--------------------------------------
+def facts = []
+def count = 5
+for (int fact = 1, i = 1; i <= count; i++, fact *= i) {
+    facts << fact
+}
+assert facts == [1, 2, 6, 24, 120]
+--------------------------------------
+
+=== Multi-assignment in combination with for loop
+
+Groovy has supported multi-assignment statements since Groovy 1.6:
+
+[source,groovy]
+--------------------------------------
+// multi-assignment with types
+def (String x, int y) = ['foo', 42]
+assert "$x $y" == 'foo 42'
+--------------------------------------
+
+These can now appear in for loops:
+
+[source,groovy]
+--------------------------------------
+// multi-assignment goes loopy
+def baNums = []
+for (def (String u, int v) = ['bar', 42]; v < 45; u++, v++) {
+    baNums << "$u $v"
+}
+assert baNums == ['bar 42', 'bas 43', 'bat 44']
+--------------------------------------
+
+=== Java-style array initialization
+
+Groovy has always supported literal list/array definitions using square brackets
+and has avoided Java-style curly braces so as not to conflict with closure definitions.
+In the case where the curly braces come immediately after an array type declaration however,
+there is no ambiguity with closure definitions, so the Java style is now also supported.
+
+Examples:
+
+[source,groovy]
+--------------------------------------
+def primes = new int[] {2, 3, 5, 7, 11}
+assert primes.size() == 5 && primes.sum() == 28
+assert primes.class.name == '[I'
+
+def pets = new String[] {'cat', 'dog'}
+assert pets.size() == 2 && pets.sum() == 'catdog'
+assert pets.class.name == '[Ljava.lang.String;'
+
+// traditional Groovy alternative still supported
+String[] groovyBooks = [ 'Groovy in Action', 'Making Java Groovy' ]
+assert groovyBooks.every{ it.contains('Groovy') }
+--------------------------------------
+
+=== Java-style Lambda syntax
+
+The Java syntax for lambda expressions is now supported.
+
+Examples:
+
+[source,groovy]
+--------------------------------------
+(1..10).forEach(e -> { println e })
+
+assert (1..10).stream()
+                .filter(e -> e % 2 == 0)
+                .map(e -> e * 2)
+                .toList() == [4, 8, 12, 16, 20]
+--------------------------------------
+
+The normal variants are supported and Groovy adds additional features such as default parameter values:
+
+[source,groovy]
+--------------------------------------
+// general form
+def add = (int x, int y) -> { def z = y; return x + z }
+assert add(3, 4) == 7
+
+// curly braces are optional for a single expression
+def sub = (int x, int y) -> x - y
+assert sub(4, 3) == 1
+
+// parameter types are optional
+def mult = (x, y) -> x * y
+assert mult(3, 4) == 12
+
+// no parentheses required for a single parameter with no type
+def isEven = n -> n % 2 == 0
+assert isEven(6)
+assert !isEven(7)
+
+// no arguments case
+def theAnswer = () -> 42
+assert theAnswer() == 42
+
+// any statement requires braces
+def checkMath = () -> { assert 1 + 1 == 2 }
+checkMath()
+
+// example showing default parameter values (no Java equivalent)
+def addWithDefault = (int x, int y = 100) -> x + y
+assert addWithDefault(1, 200) == 201
+assert addWithDefault(1) == 101
+--------------------------------------
+
+==== Implementation details and static optimization
+
+For dynamic Groovy, lambda expressions are turned into equivalent Groovy closures.
+So `(e) -> { println e }` is the same as `{e -> println e}`.
+In the spirit of providing a more Java-like experience when using `@CompileStatic`,
+we support native lambda expressions for static Groovy.
+
+=== Method references
+
+The Java 8 method reference syntax using the double colon syntax is now supported.
+Let's first look at some of the supported cases before coming back to some implementation details.
+
+The following examples illustrate referencing both static and instance methods of a class:
+
+[source,groovy]
+--------------------------------------
+import java.util.stream.Stream
+
+// class::staticMethod
+assert ['1', '2', '3'] ==
+        Stream.of(1, 2, 3)
+                .map(String::valueOf)
+                .toList()
+
+// class::instanceMethod
+assert ['A', 'B', 'C'] ==
+        ['a', 'b', 'c'].stream()
+                .map(String::toUpperCase)
+                .toList()
+--------------------------------------
+
+The following examples illustrate referencing methods of instance variables:
+
+[source,groovy]
+--------------------------------------
+// instance::instanceMethod
+def sizeAlphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'::length
+assert sizeAlphabet() == 26
+
+// instance::staticMethod
+def hexer = 42::toHexString
+assert hexer(127) == '7f'
+--------------------------------------
+
+The following examples illustrate referencing constructors:
+
+[source,groovy]
+--------------------------------------
+// normal constructor
+def r = Random::new
+assert r().nextInt(10) in 0..9
+
+// array constructor refs are handy when working with various Java libraries, e.g. streams
+assert [1, 2, 3].stream().toArray().class.name == '[Ljava.lang.Object;'
+assert [1, 2, 3].stream().toArray(Integer[]::new).class.name == '[Ljava.lang.Integer;'
+
+// works with multi-dimensional arrays too
+def make2d = String[][]::new
+def tictac = make2d(3, 3)
+tictac[0] = ['X', 'O', 'X']
+tictac[1] = ['X', 'X', 'O']
+tictac[2] = ['O', 'X', 'O']
+assert tictac*.join().join('\n') == '''
+XOX
+XXO
+OXO
+'''.trim()
+
+// also useful for your own classes
+import groovy.transform.Canonical
+import java.util.stream.Collectors
+
+@Canonical
+class Animal {
+    String kind
+}
+
+def a = Animal::new
+assert a('lion').kind == 'lion'
+
+def c = Animal
+assert c::new('cat').kind == 'cat'
+
+def pets = ['cat', 'dog'].stream().map(Animal::new)
+def names = pets.map(Animal::toString).collect(Collectors.joining( "," ))
+assert names == 'Animal(cat),Animal(dog)'
+--------------------------------------
+
+==== Implementation details and static optimization
+
+While for the most part you can ignore implementation details, it is useful
+to understand the implementation behind method references in some scenarios.
+For dynamic Groovy, a method reference is implemented as a Closure method reference.
+So `String::toUpperCase` is the same as `String.&toUpperCase`.
+In the spirit of providing a more Java-like experience when using `@CompileStatic`,
+we support native method references for static Groovy.
+
+For this example (using `String.transform` from JDK 12):
+[source,groovy]
+--------------------------------------
+@groovy.transform.CompileStatic
+def method() {
+  assert 'Hi'.transform(String::toUpperCase) == 'HI'
+}
+--------------------------------------
+The compiler will produce bytecode very similar to what Java would produce
+for this case (involves `INVOKEDYNAMIC`, method handles and `LambdaMetafactory` for the bytecode geeks).
+If you are already using `@CompileStatic` for extra compile-time type safety or performance,
+then the code will be semantically equivalent but optimized similar to Java.
+
+If you have code making use of dynamic features, then you should not use `@CompileStatic` with your method references, e.g.:
+
+[source,groovy]
+--------------------------------------
+def convertCase(boolean upper, String arg) {
+    arg.transform(String::"${upper ? 'toUpperCase' : 'toLowerCase'}")
+}
+assert convertCase(true, 'Hi') == 'HI'
+assert convertCase(false, 'Bye') == 'bye'
+--------------------------------------
+Since here the `GString` prohibits the compiler from knowing how to write the
+optimized code that would be required.
+Note: this example is a little contrived and could be refactored to call one
+of two optimized method references but hopefully you get the idea.
+
+The same caveat applies if you want to make use of the Closure nature behind the dynamic
+implementation, e.g.:
+
+[source,groovy]
+--------------------------------------
+def upper = String::toUpperCase
+assert upper('hi') == 'HI'
+def upperBye = upper.curry('bye')
+assert upperBye() == 'BYE'
+--------------------------------------
+
+=== !in and !instanceof operators
+
+When wanting the negated form, rather than having to bracket expressions containing
+the `in` and `instanceof` infix operators and placing the exclamation operator in
+front of the brackets, an inline variant is now also supported. Examples:
+
+[source,groovy]
+--------------------------------------
+/* assert !(45 instanceof Date) // old form */
+assert 45 !instanceof Date
+
+assert 4 !in [1, 3, 5, 7]
+--------------------------------------
+
+=== Elvis assignment operator
+
+Groovy introduced the Elvis operator Example:
+
+[source,groovy]
+--------------------------------------
+import groovy.transform.ToString
+
+@ToString
+class Element {
+    String name
+    int atomicNumber
+}
+
+def he = new Element(name: 'Helium')
+he.with {
+    name = name ?: 'Hydrogen'   // existing Elvis operator
+    atomicNumber ?= 2           // new Elvis assignment shorthand
+}
+assert he.toString() == 'Element(Helium, 2)'
+--------------------------------------
+
+=== Identity comparison operators
+
+Both `===` and `!==` are supported which are the same as calling the `is()` method,
+and negating a call to the `is()` method respectively.
+
+[source,groovy]
+--------------------------------------
+import groovy.transform.EqualsAndHashCode
+
+@EqualsAndHashCode
+class Creature { String type }
+
+def cat = new Creature(type: 'cat')
+def copyCat = cat
+def lion = new Creature(type: 'cat')
+
+assert cat.equals(lion) // Java logical equality
+assert cat == lion      // Groovy shorthand operator
+
+assert cat.is(copyCat)  // Groovy identity
+assert cat === copyCat  // operator shorthand
+assert cat !== lion     // negated operator shorthand
+--------------------------------------
+
+=== Safe indexing
+
+[source,groovy]
+--------------------------------------
+String[] array = ['a', 'b']
+assert 'b' == array?[1]      // get using normal array index
+array?[1] = 'c'              // set using normal array index
+assert 'c' == array?[1]
+
+array = null
+assert null == array?[1]     // return null for all index values
+array?[1] = 'c'              // quietly ignore attempt to set value
+assert null == array?[1]
+
+def personInfo = [name: 'Daniel.Sun', location: 'Shanghai']
+assert 'Daniel.Sun' == personInfo?['name']      // get using normal map index
+personInfo?['name'] = 'sunlan'                  // set using normal map index
+assert 'sunlan' == personInfo?['name']
+
+personInfo = null
+assert null == personInfo?['name']              // return null for all map values
+personInfo?['name'] = 'sunlan'                  // quietly ignore attempt to set value
+assert null == personInfo?['name']
+--------------------------------------
+
+=== "var" reserved type
+
+Groovy supports a `def` type placeholder.
+It can be used with fields, local variables, method parameters and as a method's return type.
+In dynamic Groovy, you use `def` when the type is deemed not important at compile time - normal runtime typing still applies.
+For static Groovy, it is used when type inference is preferred over an explicit type.
+
+In Groovy 3.0, a new type placeholder is available: `var`.
+It provides the syntax equivalent of Java 10's `var` reserved type (but you can use it with Groovy 3 from JDK 8).
+It can be used for fields, local variables and parameters.
+It can also be used for lambda parameters (a Java 11 feature).
+In all cases, it can be considered an alias for `def`.
+
+[source,groovy]
+--------------------------------------
+var two = 2                                                      // Java 10
+IntFunction<Integer> twice = (final var x) -> x * two            // Java 11
+assert [1, 2, 3].collect{ twice.apply(it) } == [2, 4, 6]
+--------------------------------------
+
+[width="80%",align="center"]
+|===
+a| NOTE: _Incubating Status:_ Using `var` with `@CompileStatic` is regarded as an incubating feature.
+Currently it is a direct alias for `def` which means in that scenario, type inference will be available
+which yields similar behavior to Java in most cases.
+Groovy's behavior does differ from Java in cases involving flow typing.
+The _incubating_ status indicates that we reserve the right to change the behavior for these flow typing cases.
+While some users have expressed the desire for a behavior closer to Java when `var` is used with `@CompileStatic` and flow typing,
+we currently don't think the extra complexity in changing behavior is warranted.
+We are however still exploring possibilities in this area.
+|===
+
+=== ARM Try with resources
+
+Groovy often provides better alternatives to Java 7's `try`-with-resources statement for Automatic Resource Management (ARM).
+That syntax is now supported for Java programmers migrating to Groovy and still wanting to use the old style:
+
+[source,groovy]
+--------------------------------------
+class FromResource extends ByteArrayInputStream {
+    @Override
+    void close() throws IOException {
+        super.close()
+        println "FromResource closing"
+    }
+
+    FromResource(String input) {
+        super(input.toLowerCase().bytes)
+    }
+}
+
+class ToResource extends ByteArrayOutputStream {
+    @Override
+    void close() throws IOException {
+        super.close()
+        println "ToResource closing"
+    }
+}
+
+def wrestle(s) {
+    try (
+            FromResource from = new FromResource(s)
+            ToResource to = new ToResource()
+    ) {
+        to << from
+        return to.toString()
+    }
+}
+
+def wrestle2(s) {
+    FromResource from = new FromResource(s)
+    try (from; ToResource to = new ToResource()) { // Enhanced try-with-resources in Java 9+
+        to << from
+        return to.toString()
+    }
+}
+
+assert wrestle("ARM was here!").contains('arm')
+assert wrestle2("ARM was here!").contains('arm')
+--------------------------------------
+Which yields the following output:
+--------------------------------------
+ToResource closing
+FromResource closing
+ToResource closing
+FromResource closing
+--------------------------------------
+
+=== Nested code blocks
+
+An infrequently used structure within Java is the anonymous code block.
+It's generally not encouraged as it's often a sign that refactoring the
+related code into a method is in order. But it's sometimes useful to
+restrict scoping and is now available in Groovy:
+
+[source,groovy]
+--------------------------------------
+{
+    def a = 1
+    a++
+    assert 2 == a
+}
+try {
+    a++ // not defined at this point
+} catch(MissingPropertyException ex) {
+    println ex.message
+}
+{
+    {
+        // inner nesting is another scope
+        def a = 'banana'
+        assert a.size() == 6
+    }
+    def a = 1
+    assert a == 1
+}
+--------------------------------------
+
+Be aware though that in Groovy having a code block looking structure after any method
+call will be seen as an attempt to pass a closure as the last parameter in the method call.
+This happens even after a new line. So it's safe to start an anonymous code block after any other
+block (e.g. an if-then-else statement or another anonymous code block). Anywhere else and
+you might need to terminate the previous statement with a semicolon. In which case, see the
+note above about refactoring your code! :-)
+
+===  Java-style non-static inner class instantiation
+
+Java syntax for non-static inner class instantiation is now supported.
+
+[source,groovy]
+--------------------------------------
+public class Computer {
+    public class Cpu {
+        int coreNumber
+
+        public Cpu(int coreNumber) {
+            this.coreNumber = coreNumber
+        }
+    }
+}
+
+assert 4 == new Computer().new Cpu(4).coreNumber
+--------------------------------------
+
+===  Interface default methods
+
+Java 8 supports adding default implementations to interfaces.
+Groovy's traits mechanism provides a more powerful set of OO abstractions
+for _inheriting_ implementation behavior, but Java users are now familiar with default methods,
+so Groovy now supports the same syntax:
+
+[source,groovy]
+--------------------------------------
+interface Greetable {
+    String target()
+
+    default String salutation() {
+        'Greetings'
+    }
+
+    default String greet() {
+        "${salutation()}, ${target()}"
+    }
+}
+
+class Greetee implements Greetable {
+    String name
+    @Override
+    String target() { name }
+}
+
+def daniel = new Greetee(name: 'Daniel')
+assert 'Greetings, Daniel' == "${daniel.salutation()}, ${daniel.target()}"
+assert 'Greetings, Daniel' == daniel.greet()
+--------------------------------------
+
+[width="80%",align="center"]
+|===
+a| NOTE: _Incubating Status:_ While this feature will remain, its current implementation, using traits, has incubating status.
+It results in the same behavior as Java's implementation but with less compact bytecode.
+We are still exploring approaches to also support native default methods in interfaces.
+|===
+
+=== System properties to configure that new parser
+
+* `groovy.antlr4` can be set to `false` in Groovy 3.x to disable the new parser (set via `JAVA_OPTS` if needed).
+This property is not needed in normal use, however, at least initially, if you have a problematic source file that
+doesn't seem to work with the new parser, you may be able to revert to the old parser to compile just that file.
+You won't be able to use any of the new language features with the old parser.
+The old parser is deprecated and will be removed in Groovy 4.
+* `groovy.attach.groovydoc`: whether to attach groovydoc to node as metadata while parsing groovy source code(default: false)
+* `groovy.attach.runtime.groovydoc`: whether to attach `@Groovydoc` annotation to all members which have groovydoc(i.e. `/** ... */`)
+* `groovy.antlr4.cache.threshold`: how frequently to clear the DFA cache, which is used to store symbol
+information during parsing (default: 64). The more frequently the DFA cache is cleared, the poorer parsing performance will be, but less memory will be used.
+The implementation may restrict the threshold to not be lower than some minimum value. +
+**Notice:** This is an advanced internal setting which affects the memory allocation behavior of the parser.
+You should only need to adjust this value if you are facing memory problems when compiling large Groovy files.
+* `groovy.clear.lexer.dfa.cache`: whether to clear the DFA cache of the Groovy lexer once a threshold is reached (default: false) +
+**Notice:** This is an advanced internal setting which affects the memory allocation behavior of the parser.
+You should only need to adjust this value if you are facing memory problems when compiling large Groovy files.
+
+[[Groovy3.0releasenotes-GDKimprovements]]
+== GDK improvements
+
+Groovy adds many extension methods to existing Java classes. In Groovy 3, about 80 new such extension methods were added.
+We highlight just a few here:
+
+=== `average()` on arrays and iterables
+
+[source,groovy]
+--------------------------------------
+assert 3 == [1, 2, 6].average()
+--------------------------------------
+
+=== `takeBetween()` on Strings, CharSequences and GStrings
+
+[source,groovy]
+--------------------------------------
+assert 'Groovy'.takeBetween( 'r', 'v' ) == 'oo'
+--------------------------------------
+
+=== `shuffle()` and `shuffled()` on arrays and iterables
+
+[source,groovy]
+--------------------------------------
+def orig = [1, 3, 5, 7]
+def mixed = orig.shuffled()
+assert mixed.size() == orig.size()
+assert mixed.toString() ==~ /\[(\d, ){3}\d\]/
+--------------------------------------
+
+=== `collect{ }` on `Future`
+
+[source,groovy]
+--------------------------------------
+Future<String> foobar = executor.submit{ "foobar" }
+Future<Integer> foobarSize = foobar.collect{ it.size() } // async
+assert foobarSize.get() == 6
+--------------------------------------
+
+=== `minus()` on `LocalDate`
+
+[source,groovy]
+--------------------------------------
+def xmas = LocalDate.of(2019, Month.DECEMBER, 25)
+def newYear = LocalDate.of(2020, Month.JANUARY, 1)
+assert newYear - xmas == 7 // a week apart
+--------------------------------------
+
+[[Groovy3.0releasenotes-Miscimprovements]]
+== Miscellaneous improvements
+
+=== @NullCheck AST transformation
+
+Allows null checking guards to be automatically added to methods or constructors
+which ensure all parameters are supplied with non-null values
+(link:https://issues.apache.org/jira/browse/GROOVY-8935[GROOVY-8935]).
+
+=== Embedded Groovydoc
+
+You can now embed Groovydoc comments in various ways:
+
+* They can be made available within the AST for use by AST transformations and other tools.
+Our revamped groovydoc tool (still under development) is based on this capability.
+Behind the scenes the groovydoc content is stored as node metadata but a simple API
+hides this implementation detail.
+This feature is enabled using the `groovy.attach.groovydoc` system property or
+corresponding flag in `CompilerConfiguration`.
+
+* Groovydoc comments starting with a special `/**@` opening comment delimiter can also be embedded into the class file
+(behind the scenes it's stored in a @Groovydoc annotation) and is available at runtime for access
+via reflection or via other tools. This is enabled using the `groovy.attach.runtime.groovydoc` system
+property or corresponding flag in `CompilerConfiguration`. This provides a capability in Groovy inspired
+by languages like Ruby which can embed documentation into the standard binary jar and is thus always available
+rather than relying on a separate javadoc jar.
+
+Here is an example illustrating access to groovydoc comments within the AST:
+
+[source,groovy]
+--------------------------------------
+import org.codehaus.groovy.control.*
+
+def cc = new CompilerConfiguration(optimizationOptions:
+    [(CompilerConfiguration.GROOVYDOC): true])
+
+def ast = new CompilationUnit(cc).tap {
+    addSource 'myScript.groovy', '''
+        /** class doco */
+        class MyClass {
+            /** method doco */
+            def myMethod() {}
+        }
+    '''
+    compile Phases.SEMANTIC_ANALYSIS
+}.ast
+
+def classDoc = ast.classes[0].groovydoc
+assert classDoc.content.contains('class doco')
+def methodDoc = ast.classes[0].methods[0].groovydoc
+assert methodDoc.content.contains('method doco')
+--------------------------------------
+
+Here is an example using illustrating runtime groovydoc (with and without the flag set):
+
+[source,groovy]
+--------------------------------------
+import org.codehaus.groovy.control.*
+
+def extract(shell) {
+    shell.evaluate( '''
+        /**@
+         * Some class groovydoc for Foo
+         */
+        class Foo {}
+        Foo.class
+        '''
+    ).groovydoc.content.replaceAll('[^\\w\\s]', '').trim()
+}
+
+// first without the flag set
+assert extract(new GroovyShell()) == ''
+
+// now with embedding turned on
+def cc = new CompilerConfiguration(optimizationOptions:
+    [(CompilerConfiguration.RUNTIME_GROOVYDOC): true])
+assert extract(new GroovyShell(cc)) == 'Some class groovydoc for Foo'
+--------------------------------------
+
+=== JSR308 improvements (work in progress)
+
+Groovy has been improving JSR-308 support over recent versions.
+As part of implementing the new grammar, additional support has been added.
+
+[[Groovy3.0releasenotes-Splitpackages]]
+== Split package changes (from beta-2)
+
+The Java Platform Module System requires that classes in distinct modules
+have distinct package names. Groovy has its own "modules" but these haven't
+historically been structured according to the above requirement.
+For this reason, Groovy 2.x and 3.0 should be added to the classpath not module path
+when using JDK9+. This places Groovy's classes into the unnamed module
+where the split package naming requirement is not enforced.
+
+Groovy 3 is making changes to allow the codebase to move towards the compliant
+rules and allow Groovy users to begin the migration process.
+Groovy 4 is our target version for fully-compliant artifacts but you can
+start getting your classes ready ahead of time while using Groovy 3.
+
+As part of this change, some classes are moving packages.
+In a subset of those moved classes, it makes sense
+for Groovy 3 to have two copies of such classes:
+
+* a deprecated class having the old package name
+* a new class having the new package name
+
+This can aid with migration. In many cases, you will be able to recompile
+existing Groovy classes without change and they will use the old versions of the
+classes. You may notice deprecation warnings depending on how you edit classes.
+You should migrate as soon as convenient since your classes may no longer compile under Groovy 4
+if you haven't migrated to the new class location.
+Be aware that in some cases, some work is required even under Groovy 3.
+Read the _Notes_ column in the table below for further details.
+
+[cols="1a,1a,2a"]
+|===
+|Original class/package name
+(3.0 and lower if applicable)
+|New copied class/package name +
+(3.0 and above)
+|Notes
+3+^| *Module: groovy*
+| groovy.xml.QName
+| groovy.namespace
+| You need to migrate to using the new class at the same time as you migrate to affected modules
+using that class as a parameter in methods including `groovy-ant` and `groovy-xml` but only if you
+are using methods with `QName` parameters. You can continue to use the legacy class in your existing
+code or with the legacy versions of affected classes until Groovy 4.
+3+^| *Module: groovy-ant*
+| groovy.util
+| groovy.ant
+| Add an `import groovy.ant.AntBuilder` to classes/scripts
+using `AntBuilder` or you will still be using the deprecated version.
+3+^| *Module: groovy-console*
+| groovy.ui.ConsoleApplet
+| N/A
+| The `java.applet` API is deprecated. No replacement is planned for this Groovy class in Groovy 4.
+| groovy.inspect
+| groovy.console
+.3+| `groovyConsole` is normally used as a command-line tool and its use in that form is unaffected.
+If you use any of the classes directly you can use the old versions until you migrate.
+You should not mix and match old and new classes.
+| groovy.inspect.swingui
+| groovy.console.ui
+| groovy.ui
+| groovy.console.ui
+3+^| *Module: groovy-groovysh*
+| org.codehaus.groovy.tools.shell
+| org.apache.groovy.groovysh
+| `groovysh` is normally used as a command-line tool and its use in that form is unaffected.
+If you use any of the classes directly you can use the old versions until you migrate.
+You should not mix and match old and new classes.
+3+^| *Module: groovy-jmx*
+| groovy.util.GroovyMBean
+| groovy.jmx
+| You need to add the import for `GroovyMBean` before Groovy 4.
+Feel free to use the old class in your own code but `JmxBuilder` only uses the new class.
+You should not mix the old and new classes.
+3+^| *Module: groovy-nio*
+| org.codehaus.groovy.runtime. +
+NioGroovyMethods | org.apache.groovy.nio.extensions. +
+NioExtensions | In normal use, related extension methods will simply be automatically available from the new location.
+| org.codehaus.groovy.runtime. +
+WritablePath |org.apache.groovy.nio.runtime
+| We recommend that you reference `WritablePath` via its interfaces in which case you have nothing to do.
+If you must reference the class, we recommend changing imports and recompiling all affected classes.
+If this is difficult, you can use the old class (and directly use the related `NioGroovyMethods` methods)
+until you are ready to migrate.
+You should not mix and match old and new classes.
+3+^| *Module: groovy-swing*
+| org.codehaus.groovy.binding
+| org.apache.groovy.swing.binding
+.3+| You can continue to use the old classes if you use them in your existing code or from within legacy classes still
+using the old classes. `SwingBuilder` now uses the new classes.
+| groovy.model
+| groovy.swing.model
+| groovy.inspect.swingui
+| org.apache.groovy.swing.table
+3+^| *Module: groovy-test*
+| org.codehaus.groovy.runtime. +
+ScriptTestAdapter
+| org.apache.groovy.test
+| The old class remains available for use in your own classes if already in use
+but won't be recognized by Groovy 3's JUnit-related test suite classes.
+| groovy.transform. +
+NotYetImplemented
+| groovy.test. +
+NotYetImplemented
+| Both point to the (moved but otherwise unchanged) AST transform class.
+| groovy.util
+| groovy.test
+.2+| For classes like `GroovyTestCase`, you need to import `groovy.test.GroovyTestCase` to not
+get the deprecated version. You will need to do this before Groovy 4.
+| groovy.lang
+| groovy.test
+3+^| *Module: groovy-xml*
+| groovy.util
+| groovy.xml
+| For classes like `XmlParser` and `XmlSlurper`, you need to import `groovy.xml.XmlParser` and `groovy.xml.XmlSlurper` respectively to not
+get the deprecated versions. You will need to do this before Groovy 4. If you are using `groovy.xml.XmlUtil.serialize` on a
+  `groovy.util.slurpersupport.GPathResult`, you will need to swap to using the deprecated methods in `groovy.util.XmlUtil` since
+  `groovy.xml.XmlUtil` only handles the new classes.
+| org.codehaus.groovy.tools.xml.DomToGroovy
+| org.apache.groovy.xml.tools
+|
+|===
+
+[[Groovy3.0releasenotes-OtherBreaking]]
+== Other breaking changes
+In addition to the split package changes, the following other breaking changes exist:
+
+* For JDK13+ users, consider using `stripIndent(true)` instead of `stripIndent()`
+(link:https://issues.apache.org/jira/browse/GROOVY-9423[GROOVY-9423])
+* If a Groovy switch statement has a default branch, it is now required to be the last branch
+* If you extend `ProcessingUnit` and override `setConfiguration`, override `configure` instead
+(link:https://issues.apache.org/jira/browse/GROOVY-9122[GROOVY-9122])
+* If you override `GroovyClassLoader`, be aware that the types for `sourceCache` and `classCache`
+have changed from `Map` to stronger types
+(link:https://issues.apache.org/jira/browse/GROOVY-9112[GROOVY-9112])
+* You may notice some minor changes wrt whitespace positioning for help output
+for Groovy tools and CliBuilder usage with Picocli
+(link:https://issues.apache.org/jira/browse/GROOVY-8925[GROOVY-8925])
+* Iterating over a String has been made consistent between static and dynamic Groovy
+(link:https://issues.apache.org/jira/browse/GROOVY-8882[GROOVY-8882])
+* Alpha versions of Groovy 3 incorrectly let you leave off the brackets when printing empty maps,
+but they are now required, e.g `println([:])`
+* Groovy used to bundle a version of picocli in the distribution but that locked folks into using the supplied version.
+You may now need to add an extra `@Grab` in certain scripts.
+(link:https://issues.apache.org/jira/browse/GROOVY-9165[GROOVY-9165])
+* To avoid usually unnecessary import processing, `ImportCustomizer` is applied once per module rather than previously once per class
+(link:https://issues.apache.org/jira/browse/GROOVY-8399[GROOVY-8399]). If you need the old behavior, see the workaround in
+(link:https://issues.apache.org/jira/browse/GROOVY-9407[GROOVY-9407]).
+
+[[Groovy3.0releasenotes-KnownIssues]]
+== Known issues
+
+* 3.0.0 was missing some classes needed for complete operation on JDK9+ without warnings.
+
+[[Groovy3.0releasenotes-JdkRequirements]]
+== JDK requirements
+
+Groovy 3.0 requires JDK9+ to build and JDK8 is the minimum version of the JRE that we support.
+
+[[Groovy3.0releasenotes-Moreinformation]]
+== More information
+
+You can browse all the link:../changelogs/changelog-3.0.0.html[tickets closed for Groovy 3.0 in JIRA].
+
+[[Groovy3.0releasenotes-3.0.3]]
+== Addendum for 3.0.3
+
+JUnit 3 users using the `@NotYetImplemented` annotation should consider one of the following:
+
+* Stick with the legacy/deprecated `@groovy.transform.NotYetImplemented` annotation
+* If using the now recommended `@groovy.test.NotYetImplemented` annotation, use the `exception=junit.framework.AssertionFailedError` annotation attribute
+* Consider upgrading to JUnit 4 or 5
+
+For further details see (link:https://issues.apache.org/jira/browse/GROOVY-9492[GROOVY-9492]).
+
+[[Groovy3.0releasenotes-3.0.4]]
+== Addendum for 3.0.4
+
+We bumped the Groovy dependency for TestNG to 7.2.0. Unfortunately, at the time of release, that version exists only in jcenter,
+not Maven central. If you are using the groovy-all pom or bom, you can add jcenter as a repository to your configuration if not already listed:
+
+++++
+<details open>
+<summary>Gradle: build.gradle</summary>
+++++
+
+[source,groovy]
+----
+repositories {
+    jcenter()
+    ...
+}
+----
+
+++++
+</details>
+++++
+
+++++
+<details>
+<summary>Maven: pom.xml</summary>
+++++
+
+[source,xml]
+----
+<repositories>
+  <repository>
+    <id>central</id>
+    <name>bintray</name>
+    <url>http://jcenter.bintray.com</url>
+  </repository>
+</repositories>
+----
+
+++++
+</details>
+++++
+
+Alternatively, if you are not using TestNG, you can exclude `groovy-testng`, e.g.:
+
+++++
+<details open>
+<summary>Gradle: build.gradle</summary>
+++++
+
+[source,groovy]
+----
+dependencies {
+    implementation("org.codehaus.groovy:groovy-all:3.0.4") {
+        exclude(group: 'org.codehaus.groovy', module: 'groovy-testng')
+    }
+}
+----
+
+++++
+</details>
+++++
+
+++++
+<details>
+<summary>Maven: pom.xml</summary>
+++++
+
+[source,xml]
+----
+<dependencies>
+  <dependency>
+    <groupId>org.codehaus.groovy</groupId>
+    <artifactId>groovy-all</artifactId>
+    <version>3.0.4</version>
+    <scope>compile</scope>
+    <exclusions>
+      <exclusion>
+        <groupId>org.codehaus.groovy</groupId>
+        <artifactId>groovy-testng</artifactId>
+      </exclusion>
+    </exclusions>
+  </dependency>
+</dependencies>
+----
+
+++++
+</details>
+++++
+
+[[Groovy3.0releasenotes-3.0.5]]
+== Addendum for 3.0.5
+
+=== Potentially unexpected dependency changes
+
+* We have reverted TestNG to 7.1.0, so the workarounds mentioned in the 3.0.4 release notes
+are no longer needed. You can exclude 7.1.0 and explicitly include 7.2.0 if you specifically
+need that version of TestNG.
+
+=== Breaking changes
+
+* If you are using `SecureASTCustomizer` and relying on the exact wording of error
+messages, e.g. perhaps in tests, then you may need to tweak the wording in those tests
+(link:https://issues.apache.org/jira/browse/GROOVY-9594[GROOVY-9594]).
+
+* If you are using the `groovy-cli-picocli` module or scripting most of Groovy's command line tools
+(e.g. `groovy`, `groovyc`, `groovysh`, `groovydoc` etc.)
+and you are relying on the exact wording of error messages, e.g. perhaps in tests,
+then you may need to tweak the wording in those tests
+(link:https://issues.apache.org/jira/browse/GROOVY-9627[GROOVY-9627]).
+
+* Groovy is now more compliant with the JavaBeans specification for one edge case scenario
+involving any field having a name starting with an uppercase letter
+(link:https://issues.apache.org/jira/browse/GROOVY-9618[GROOVY-9618]).
+
+[[Groovy3.0releasenotes-3.0.8]]
+== Addendum for 3.0.8
+
+=== Breaking changes
+
+* A regression in the parser which distinguishes between variable declarations and command
+expressions for a particular edge case has been fixed to align with pre Groovy 3 behavior.
+Previously, expressions  like `foo bar` and `pass:[_]foo bar` were treated
+as command expressions whereas `Foo bar` was deemed  a variable expression.
+The `foo` and `Foo` cases remained unaltered but the `pass:[_]foo` case was
+unintentionally flipped. Anyone relying on the flipped behavior should change their code to align
+with previous behavior. The edge case only involves variable declarations
+with an explicit type where the type starts with a dollar or underscore character.
+(link:https://issues.apache.org/jira/browse/GROOVY-9936[GROOVY-9936]).

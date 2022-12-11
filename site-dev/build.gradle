@@ -1,0 +1,223 @@
+/*
+ *  Licensed to the Apache Software Foundation (ASF) under one
+ *  or more contributor license agreements.  See the NOTICE file
+ *  distributed with this work for additional information
+ *  regarding copyright ownership.  The ASF licenses this file
+ *  to you under the Apache License, Version 2.0 (the
+ *  "License"); you may not use this file except in compliance
+ *  with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing,
+ *  software distributed under the License is distributed on an
+ *  "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ *  KIND, either express or implied.  See the License for the
+ *  specific language governing permissions and limitations
+ *  under the License.
+ */
+
+import groovy.text.markup.MarkupTemplateEngine
+import groovy.text.markup.TemplateConfiguration
+import org.gradle.internal.logging.ConsoleRenderer
+import util.CssFilter
+import util.JsFilter
+import util.CheckLinks
+
+plugins {
+    id 'base'                  // common lifecycle tasks and artifact types
+    id 'org.ajoberstar.grgit' version '4.1.0' // to publish website to asf-git branch
+}
+
+ext {
+    grgitClass = org.ajoberstar.grgit.Grgit
+}
+ext.watchmode = project.hasProperty('watchmode')?project.getProperty('watchmode'):'false'
+// a collection of links which have either been validated or are dummy links
+ext.excludeFromChecks = [
+        'http://issues.apache.org/jira',
+        'https://issues.apache.org/jira',
+        'target.html',
+        'foo.html',
+        'http://www.acme.com/cars',
+        'http://localhost:8080/groovy/hello.groovy'
+]
+
+def commitedChanges = false
+def gitboxUrl = project.findProperty('gitPublishRemote') ?: 'https://gitbox.apache.org/repos/asf/groovy-dev-site.git'
+def stagingDevSite = "$project.buildDir/staging-dev-site/"
+def generatedDevSite = "$project.buildDir/site/"
+
+task copyAssets(type:Copy) {
+    from file('../site/src/site/assets')
+    into file("$buildDir/site")
+    filesMatching('**/*.css') { f->
+        if (!f.name.contains('.min.')) {
+            filter(CssFilter)
+        }
+    }
+    filesMatching('**/*.js') { f->
+        if (!f.name.contains('.min.')) {
+            filter(JsFilter)
+        }
+    }
+}
+
+task copyWikiAssets(type:Copy) {
+    from file('../site/src/site/wiki/img')
+    into file("$buildDir/site/wiki/img")
+}
+
+task generateSite(type:JavaExec) {
+
+    description = 'Generates the Groovy Dev Website'
+    dependsOn copyAssets
+    dependsOn copyWikiAssets
+    ext.sources = file('../site/src/site')
+    ext.outputDir = file("$buildDir/site")
+
+    inputs.files fileTree(sources)
+    outputs.files fileTree(outputDir)
+
+    classpath = project(':generator').sourceSets.main.runtimeClasspath
+    main = 'generator.SiteGenerator'
+    args = [sources, outputDir, 'sitemap-dev.groovy', project.watchmode]
+    systemProperties.docs_baseurl = System.getProperty('docs_baseurl')
+}
+
+task checkDeadLinks(dependsOn: generateSite) {
+    description = "Checks for dead links in the generated Groovy website"
+
+    ext.outputDir = file("$buildDir/reports")
+    ext.reportFile = file("$outputDir/deadlinks.html")
+
+    inputs.files fileTree(generateSite.outputDir)
+    outputs.file reportFile
+
+    doLast {
+        def baseDir = generateSite.outputDir
+        def checkLinks = new CheckLinks(baseDir: baseDir,
+                excludeFromChecks: excludeFromChecks,
+                logger: logger)
+
+        file(baseDir).eachFileRecurse {
+            if (it.name.endsWith('.html')) {
+                checkLinks.checkPage(it)
+            }
+        }
+
+        outputDir.mkdirs()
+        def tplConf = new TemplateConfiguration()
+        tplConf.with {
+            autoIndent = true
+            autoNewLine = true
+        }
+        def tplEngine = new MarkupTemplateEngine(this.class.classLoader, file('../site/gradle/templates'), tplConf)
+
+        def report = tplEngine.createTemplateByPath("deadlinks.groovy").make(deadLinks: checkLinks.deadLinks).toString()
+
+        reportFile.write(report, 'utf-8')
+        def reportURL = new ConsoleRenderer().asClickableFileUrl(reportFile)
+        logger.lifecycle "Dead links report written at $reportURL"
+    }
+}
+
+task webzip(type:Zip, dependsOn: checkDeadLinks) {
+    description = "Creates a zip with the generated website and the deadlink report"
+    destinationDir = file("$buildDir/distributions")
+
+    baseName = 'groovy'
+    appendix = 'website'
+    from(generateSite.outputDir) {
+        into 'site'
+    }
+    from (checkDeadLinks.outputDir) {
+        into 'reports'
+    }
+}
+
+// Creates a new commit on asf-site branch
+task commitWebsite(dependsOn: webzip) {
+    doLast {
+        assert grgitClass : "git repository not found?"
+        assert file("$generatedDevSite/index.html").exists()
+        // get the latest commit on master
+        def gitin = grgitClass.open(dir: rootProject.projectDir)
+        def latestCommit = gitin.log(maxCommits: 1)[0].abbreviatedId
+
+        def gitout
+        if (project.hasProperty('skipClone')) {
+            gitout = grgitClass.open(dir: stagingDevSite)
+        } else {
+            println "Cloning $gitboxUrl to $stagingDevSite. This may take a few minutes ..."
+            gitout = grgitClass.clone(dir: stagingDevSite, uri: gitboxUrl)
+        }
+
+        gitout.checkout(branch: 'asf-site')
+
+        // Delete the previous content. These are asf-site branch paths.
+        gitout.remove(patterns: ['.'])
+        fileTree(stagingDevSite).exclude('.git', '.asf.yaml').visit { delete it.file }
+        assert !file("${stagingDevSite}/index.html").exists()
+
+        // Copy the built content and add it.
+        copy {
+            from generatedDevSite
+            into stagingDevSite
+        }
+        assert file("${stagingDevSite}/index.html").exists()
+        gitout.add(patterns: ['.'], update: true)
+
+        if (!gitout.status().staged.getAllChanges()) {
+            println 'No changes to commit'
+        } else {
+            println 'Creating commit for changes'
+            def now = new Date().format('yyyy/MM/dd HH:mm:ss')
+            String message = "$now: Generated dev website from groovy-website@$latestCommit"
+            commitedChanges = true
+            gitout.commit(message: message)
+        }
+    }
+}
+
+/*
+ * Pushes the asf-site branch commits.
+ *
+ * This requires write access to the asf-site branch and can be run on
+ * Jenkins executors with the git-websites label.
+ *
+ * For more details on publishing, see:
+ * https://www.apache.org/dev/project-site.html
+ * https://github.com/apache/infrastructure-puppet/blob/deployment/modules/gitwcsub/files/config/gitwcsub.cfg
+ *
+ * You can test this locally with a forked repository by manually adding the
+ * website-publish remote pointing to your forked repository, for example:
+ *   git remote add website-publish git@github.com:${GITUSER}/groovy-website.git
+ * because the remote is only added if it doesn't exist. The remote needs
+ * to be added before every execution of the publishing.
+ */
+task publishWebsite(dependsOn: commitWebsite) {
+    doLast {
+        assert grgit : "git repository not found?"
+
+        def git = grgit.open(dir: stagingDevSite)
+        git.checkout(branch: 'asf-site')
+        if (!commitedChanges) {
+            println 'No changes to push'
+            return
+        }
+
+        // Because git.push() fails to authenticate, run git push directly.
+        def cmd = 'git push origin asf-site'
+        exec {
+            workingDir stagingDevSite
+            if (System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('windows')) {
+                executable 'cmd.exe'
+                args '/c', cmd
+            } else {
+                executable 'sh'
+                args '-c', cmd
+            }
+        }
+    }
+}
